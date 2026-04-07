@@ -141,6 +141,41 @@ interface SerializedToolInput {
   requestContextSchema?: { jsonSchema?: unknown } | unknown;
 }
 
+/**
+ * Forward client-tool observability spans+logs the client returned in
+ * a request body to the @mastra/observability ingest. Called from the
+ * generate and stream handlers before the new agent run starts so the
+ * client-side telemetry from the previous turn is in the bus by the
+ * time exporters fire.
+ *
+ * Tracing must never break the agent run, so all errors are caught
+ * and logged at warn level.
+ */
+function ingestClientToolObservability(
+  mastra: { observability?: { getClientToolObservabilityIngest?: () => unknown }; getLogger?: () => unknown },
+  observability:
+    | {
+        parentContext?: { traceparent: string; tracestate?: string; baggage?: string };
+        payload?: { spans?: unknown; logs?: unknown };
+      }
+    | undefined,
+): void {
+  if (!observability?.payload || !observability.parentContext) return;
+  try {
+    const ingest = mastra.observability?.getClientToolObservabilityIngest?.() as
+      | { ingest: (payload: unknown, parentContext: unknown) => void }
+      | undefined;
+    if (ingest) {
+      ingest.ingest(observability.payload, observability.parentContext);
+    }
+  } catch (err) {
+    const logger = mastra.getLogger?.() as { warn?: (msg: string, data?: Record<string, unknown>) => void } | undefined;
+    logger?.warn?.('[ClientToolObservability] failed to ingest client tool observability payload', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
 function resolveLazySchema(schema: unknown): unknown {
   if (typeof schema === 'function') {
     return resolveLazySchema(schema());
@@ -1026,7 +1061,13 @@ export const GENERATE_AGENT_ROUTE = createRoute({
       // but it interferes with llm providers tool handling, so we remove them
       sanitizeBody(params, ['tools']);
 
-      const { messages, memory: memoryOption, requestContext: bodyRequestContext, ...rest } = params;
+      const {
+        messages,
+        memory: memoryOption,
+        requestContext: bodyRequestContext,
+        observability: clientToolObservability,
+        ...rest
+      } = params;
 
       validateBody({ messages });
 
@@ -1040,6 +1081,9 @@ export const GENERATE_AGENT_ROUTE = createRoute({
           }
         }
       }
+
+      // Client tool observability ingest: see stream handler.
+      ingestClientToolObservability(mastra, clientToolObservability);
 
       // Authorization: apply context overrides to memory option if present
       let authorizedMemoryOption = memoryOption;
@@ -1319,7 +1363,13 @@ export const STREAM_GENERATE_ROUTE = createRoute({
       // but it interferes with llm providers tool handling, so we remove them
       sanitizeBody(params, ['tools']);
 
-      const { messages, memory: memoryOption, requestContext: bodyRequestContext, ...rest } = params;
+      const {
+        messages,
+        memory: memoryOption,
+        requestContext: bodyRequestContext,
+        observability: clientToolObservability,
+        ...rest
+      } = params;
       validateBody({ messages });
 
       // Merge body's requestContext values into the server's RequestContext instance
@@ -1332,6 +1382,12 @@ export const STREAM_GENERATE_ROUTE = createRoute({
           }
         }
       }
+
+      // Client tool observability ingest: if the request body carries
+      // OTLP/JSON spans/logs from a prior client-side tool execution,
+      // forward them through the @mastra/observability ingest BEFORE
+      // starting the new run.
+      ingestClientToolObservability(mastra, clientToolObservability);
 
       // Authorization: apply context overrides to memory option if present
       let authorizedMemoryOption = memoryOption;
