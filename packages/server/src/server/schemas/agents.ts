@@ -290,6 +290,10 @@ export const agentExecutionBodySchema = z
           .object({
             spans: z.unknown().optional(),
             logs: z.unknown().optional(),
+            /** Wall-clock duration of the client tool's execute() in ms. */
+            executionDurationMs: z.number().optional(),
+            /** Name of the client tool that was executed (used as metric label). */
+            toolName: z.string().optional(),
           })
           .optional(),
       })

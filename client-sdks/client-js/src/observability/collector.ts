@@ -119,6 +119,9 @@ class ClientToolObservabilityCollectorImpl implements ClientToolObservabilityCol
   readonly #logs: BufferedLog[] = [];
   /** Stack of currently-active span IDs (innermost last). */
   readonly #spanStack: string[] = [];
+  /** Wall-clock execution timing, captured by withContext. */
+  #executionStartMs: number | undefined;
+  #executionEndMs: number | undefined;
   #flushed = false;
 
   constructor(parentContext: ClientToolObservabilityContext) {
@@ -138,19 +141,28 @@ class ClientToolObservabilityCollectorImpl implements ClientToolObservabilityCol
   }
 
   async withContext<T>(fn: () => Promise<T> | T): Promise<T> {
-    // Two responsibilities:
+    // Three responsibilities:
     //  1. Push the carrier root onto the span stack so nested span()
     //     calls parent under it.
     //  2. Make this collector visible via
     //     `getCurrentClientToolObservabilityCollector()` so user
     //     execute functions can find it without needing the SDK to
     //     wire it through their tool's options object.
+    //  3. Measure wall-clock execution time around the user-supplied
+    //     function. The server has no way to recover this otherwise
+    //     because the CLIENT_TOOL_CALL event span has no endTime; the
+    //     measured value is shipped back via flush() and emitted as
+    //     mastra_client_tool_duration_ms by the ingest.
     this.#spanStack.push(this.#rootSpanId);
     const previous = currentCollector;
     currentCollector = this;
+    if (this.#executionStartMs === undefined) {
+      this.#executionStartMs = Date.now();
+    }
     try {
       return await fn();
     } finally {
+      this.#executionEndMs = Date.now();
       currentCollector = previous;
       this.#spanStack.pop();
     }
@@ -204,6 +216,10 @@ class ClientToolObservabilityCollectorImpl implements ClientToolObservabilityCol
     this.#flushed = true;
 
     const payload: ClientToolObservabilityPayload = {};
+
+    if (this.#executionStartMs !== undefined && this.#executionEndMs !== undefined) {
+      payload.executionDurationMs = this.#executionEndMs - this.#executionStartMs;
+    }
 
     if (this.#spans.length > 0) {
       payload.spans = {

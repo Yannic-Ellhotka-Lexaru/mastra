@@ -19,13 +19,14 @@
  */
 
 import type { IMastraLogger } from '@mastra/core/logger';
-import { TracingEventType } from '@mastra/core/observability';
+import { EntityType, TracingEventType } from '@mastra/core/observability';
 import type {
   AnySpan,
   ClientToolObservabilityContext,
   ClientToolObservabilityIngest,
   ClientToolObservabilityPayload,
   LogEvent,
+  MetricEvent,
   ObservabilityInstance,
   TracingEvent,
 } from '@mastra/core/observability';
@@ -89,7 +90,7 @@ class ClientToolObservabilityIngestImpl implements ClientToolObservabilityIngest
   }
 
   ingest(payload: ClientToolObservabilityPayload, parentContext: ClientToolObservabilityContext): void {
-    if (!payload || (!payload.spans && !payload.logs)) {
+    if (!payload || (!payload.spans && !payload.logs && payload.executionDurationMs === undefined)) {
       return;
     }
 
@@ -173,6 +174,36 @@ class ClientToolObservabilityIngestImpl implements ClientToolObservabilityIngest
       const log = buildExportedLog(decoded);
       const event: LogEvent = { type: 'log', log };
       instance.__ingestExternalEvent(event);
+    }
+
+    // Emit a duration metric for the client tool execution. This is
+    // the only way the server can recover the actual wall-clock
+    // duration since the CLIENT_TOOL_CALL event span has no endTime
+    // and therefore would be skipped by the existing
+    // emitDurationMetrics auto-extraction path.
+    if (typeof payload.executionDurationMs === 'number') {
+      // Status: error if any decoded span reported an error status
+      // (OTLP code 2 = ERROR), otherwise ok. This matches the
+      // semantics of the existing mastra_tool_duration_ms metric.
+      const hasError = decodedSpans.some(s => s.statusCode === 2);
+      const metricEvent: MetricEvent = {
+        type: 'metric',
+        metric: {
+          timestamp: new Date(),
+          traceId: parent.traceId,
+          spanId: parent.spanId,
+          name: 'mastra_client_tool_duration_ms',
+          value: payload.executionDurationMs,
+          labels: { status: hasError ? 'error' : 'ok' },
+          correlationContext: {
+            traceId: parent.traceId,
+            spanId: parent.spanId,
+            entityType: EntityType.TOOL,
+            ...(payload.toolName ? { entityName: payload.toolName } : {}),
+          },
+        },
+      };
+      instance.__ingestExternalEvent(metricEvent);
     }
   }
 

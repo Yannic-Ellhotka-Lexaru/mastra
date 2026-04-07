@@ -188,9 +188,16 @@ async function executeToolCallAndRespond<OUTPUT>({
         // a collector, we still echo the parentContext so server-side
         // cross-request trace inheritance works.
         if (parentContext) {
+          // Stamp the tool name onto the payload so the server can
+          // emit a duration metric labeled by tool. The collector
+          // doesn't know it (the SDK does), so we add it here.
+          const flushed = collector ? (collector.flush() as Record<string, unknown>) : undefined;
+          if (flushed) {
+            flushed.toolName = toolCall.payload.toolName;
+          }
           (respondOptions as { observability?: unknown }).observability = {
             parentContext,
-            ...(collector ? { payload: collector.flush() } : {}),
+            ...(flushed ? { payload: flushed } : {}),
           };
         }
 

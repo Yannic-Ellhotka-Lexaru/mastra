@@ -35,16 +35,35 @@ export interface ClientToolObservabilityContext {
  * OTLP/JSON payload returned from client to server attached to the
  * tool result.
  *
- * Both fields are typed as `unknown` at the core boundary; the
+ * `spans` and `logs` are typed as `unknown` at the core boundary; the
  * implementation in `@mastra/observability` validates the actual
  * OTLP/JSON shape (`ResourceSpans` for `spans`, `ResourceLogs` for
  * `logs`) before forwarding to the observability bus.
+ *
+ * `executionDurationMs` and `toolName` are populated by the client SDK
+ * collector so the server can emit a `mastra_client_tool_duration_ms`
+ * metric tied to the deferred CLIENT_TOOL_CALL event span. They are
+ * the only way the server can recover the actual wall-clock duration
+ * of the client-side execution: the server-side event span occurs at
+ * a point in time and has no endTime.
  */
 export interface ClientToolObservabilityPayload {
   /** OTLP/JSON encoded ResourceSpans */
   spans?: unknown;
   /** OTLP/JSON encoded ResourceLogs */
   logs?: unknown;
+  /**
+   * Wall-clock duration in milliseconds of the client tool's execute
+   * function, measured by the collector around the user-supplied
+   * function. Forwarded as `mastra_client_tool_duration_ms` by the
+   * ingest implementation.
+   */
+  executionDurationMs?: number;
+  /**
+   * The name of the client tool that was executed. Used as the
+   * `entityName` on the duration metric so it can be filtered by tool.
+   */
+  toolName?: string;
 }
 
 /**

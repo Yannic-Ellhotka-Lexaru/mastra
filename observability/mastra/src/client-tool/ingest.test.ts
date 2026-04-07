@@ -158,6 +158,65 @@ describe('ingest happy path', () => {
     expect(bus.events).toHaveLength(4);
   });
 
+  it('emits a duration metric when executionDurationMs is present', () => {
+    const { instance, bus } = createFakeInstance();
+    const ingest = createClientToolObservabilityIngest({ resolveInstance: () => instance });
+    ingest.ingest(
+      {
+        spans: spansPayload([makeSpan()]),
+        executionDurationMs: 234,
+        toolName: 'fetchUser',
+      },
+      carrier(),
+    );
+    // 1 span -> start + end = 2 events, plus 1 metric
+    expect(bus.events).toHaveLength(3);
+    const metric = bus.events.find(e => (e as { type: string }).type === 'metric') as
+      | {
+          metric: {
+            name: string;
+            value: number;
+            labels: Record<string, string>;
+            correlationContext: Record<string, unknown>;
+          };
+        }
+      | undefined;
+    expect(metric).toBeDefined();
+    expect(metric!.metric.name).toBe('mastra_client_tool_duration_ms');
+    expect(metric!.metric.value).toBe(234);
+    expect(metric!.metric.labels).toEqual({ status: 'ok' });
+    expect(metric!.metric.correlationContext).toMatchObject({
+      traceId: TRACE_ID,
+      spanId: PARENT_SPAN_ID,
+      entityName: 'fetchUser',
+    });
+  });
+
+  it('emits the duration metric with status=error when any span errored', () => {
+    const { instance, bus } = createFakeInstance();
+    const ingest = createClientToolObservabilityIngest({ resolveInstance: () => instance });
+    ingest.ingest(
+      {
+        spans: spansPayload([makeSpan({ status: { code: 2, message: 'boom' } })]),
+        executionDurationMs: 99,
+        toolName: 'fetchUser',
+      },
+      carrier(),
+    );
+    const metric = bus.events.find(e => (e as { type: string }).type === 'metric') as
+      | { metric: { labels: Record<string, string> } }
+      | undefined;
+    expect(metric?.metric.labels.status).toBe('error');
+  });
+
+  it('emits the duration metric even when no spans are sent', () => {
+    const { instance, bus } = createFakeInstance();
+    const ingest = createClientToolObservabilityIngest({ resolveInstance: () => instance });
+    ingest.ingest({ executionDurationMs: 42, toolName: 'fetchUser' }, carrier());
+    expect(bus.events).toHaveLength(1);
+    expect((bus.events[0] as { type: string }).type).toBe('metric');
+  });
+
   it('forwards log records as log events', () => {
     const { instance, bus } = createFakeInstance();
     const ingest = createClientToolObservabilityIngest({ resolveInstance: () => instance });

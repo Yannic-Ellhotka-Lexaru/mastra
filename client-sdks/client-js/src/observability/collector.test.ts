@@ -128,6 +128,23 @@ describe('ClientToolObservabilityCollector', () => {
     expect(logs[1]!.spanId).not.toBe(PARENT_SPAN_ID);
   });
 
+  it('measures wall-clock execution duration in withContext', async () => {
+    const collector = createClientToolObservabilityCollector(makeCarrier());
+    await collector.withContext(async () => {
+      await new Promise(resolve => setTimeout(resolve, 25));
+    });
+    const payload = collector.flush();
+    expect(payload.executionDurationMs).toBeDefined();
+    // Allow some slack for slow CI; the floor is what matters.
+    expect(payload.executionDurationMs!).toBeGreaterThanOrEqual(20);
+  });
+
+  it('does not include duration when withContext was never called', () => {
+    const collector = createClientToolObservabilityCollector(makeCarrier());
+    const payload = collector.flush();
+    expect(payload.executionDurationMs).toBeUndefined();
+  });
+
   it('flush() returns empty payload after first call', async () => {
     const collector = createClientToolObservabilityCollector(makeCarrier());
     await collector.withContext(async () => {
