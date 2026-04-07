@@ -52,6 +52,7 @@ interface SpanTypeMap {
   MODEL_STEP: ModelStepAttributes
   MODEL_CHUNK: ModelChunkAttributes
   TOOL_CALL: ToolCallAttributes
+  CLIENT_TOOL_CALL: ClientToolCallAttributes
   MCP_TOOL_CALL: MCPToolCallAttributes
   PROCESSOR_RUN: ProcessorRunAttributes
   WORKFLOW_STEP: WorkflowStepAttributes
@@ -211,6 +212,15 @@ enum SpanType {
 
   /** Function/tool execution with inputs, outputs, errors */
   TOOL_CALL = 'tool_call',
+
+  /**
+   * Client-side tool execution. Parent span lives on the server with
+   * status='deferred'; child spans/logs flow back from the client SDK
+   * as OTLP/JSON via the ClientToolObservabilityIngest interface in
+   * @mastra/observability. See the "Client tools" section in the
+   * @mastra/client-js reference for the full flow.
+   */
+  CLIENT_TOOL_CALL = 'client_tool_call',
 
   /** Workflow run - root span for workflow processes */
   WORKFLOW_RUN = 'workflow_run',

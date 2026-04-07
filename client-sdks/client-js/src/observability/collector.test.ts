@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { createClientToolObservabilityCollector } from './collector';
+import { createClientToolObservabilityCollector, getCurrentClientToolObservabilityCollector } from './collector';
 
 const TRACE_ID = '11111111111111111111111111111111';
 const PARENT_SPAN_ID = 'aaaaaaaaaaaaaaaa';
@@ -142,6 +142,36 @@ describe('ClientToolObservabilityCollector', () => {
   it('returns empty payload when no spans or logs were captured', () => {
     const collector = createClientToolObservabilityCollector(makeCarrier());
     expect(collector.flush()).toEqual({});
+  });
+
+  describe('getCurrentClientToolObservabilityCollector', () => {
+    it('returns undefined outside withContext', () => {
+      expect(getCurrentClientToolObservabilityCollector()).toBeUndefined();
+    });
+
+    it('returns the active collector inside withContext', async () => {
+      const collector = createClientToolObservabilityCollector(makeCarrier());
+      let observed: ReturnType<typeof getCurrentClientToolObservabilityCollector> = undefined;
+      await collector.withContext(async () => {
+        observed = getCurrentClientToolObservabilityCollector();
+      });
+      expect(observed).toBe(collector);
+      // Cleared after withContext returns.
+      expect(getCurrentClientToolObservabilityCollector()).toBeUndefined();
+    });
+
+    it('restores the previous collector after a nested withContext', async () => {
+      const outer = createClientToolObservabilityCollector(makeCarrier());
+      const inner = createClientToolObservabilityCollector(makeCarrier());
+      await outer.withContext(async () => {
+        expect(getCurrentClientToolObservabilityCollector()).toBe(outer);
+        await inner.withContext(async () => {
+          expect(getCurrentClientToolObservabilityCollector()).toBe(inner);
+        });
+        expect(getCurrentClientToolObservabilityCollector()).toBe(outer);
+      });
+      expect(getCurrentClientToolObservabilityCollector()).toBeUndefined();
+    });
   });
 
   it('degrades to a synthetic root when traceparent is malformed', async () => {

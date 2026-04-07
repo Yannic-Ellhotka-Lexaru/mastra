@@ -138,13 +138,20 @@ class ClientToolObservabilityCollectorImpl implements ClientToolObservabilityCol
   }
 
   async withContext<T>(fn: () => Promise<T> | T): Promise<T> {
-    // The "root" of the collector context is the parent span the
-    // server gave us. Push it onto the stack so any nested span() calls
-    // parent under it.
+    // Two responsibilities:
+    //  1. Push the carrier root onto the span stack so nested span()
+    //     calls parent under it.
+    //  2. Make this collector visible via
+    //     `getCurrentClientToolObservabilityCollector()` so user
+    //     execute functions can find it without needing the SDK to
+    //     wire it through their tool's options object.
     this.#spanStack.push(this.#rootSpanId);
+    const previous = currentCollector;
+    currentCollector = this;
     try {
       return await fn();
     } finally {
+      currentCollector = previous;
       this.#spanStack.pop();
     }
   }
@@ -261,3 +268,43 @@ class ClientToolObservabilityCollectorImpl implements ClientToolObservabilityCol
  */
 export const createClientToolObservabilityCollector: ClientToolObservabilityCollectorFactory = parentContext =>
   new ClientToolObservabilityCollectorImpl(parentContext);
+
+// ============================================================================
+// Current collector accessor
+// ============================================================================
+//
+// JavaScript is single-threaded, so a synchronous module-level "current
+// collector" works inside any execute() call as long as there is at most
+// one client tool running at a time. Concurrent client tool executions
+// would race on this global, but that scenario is degenerate today: the
+// agent loop sees one tool call at a time per agent run, and the SDK
+// processes them sequentially in `executeToolCallAndRespond`.
+//
+// AsyncLocalStorage would be the more correct primitive for Node, but
+// is not available in browsers, and the @mastra/client-js bundle is
+// browser-first. We accept the simpler global pattern as the price of
+// universal portability.
+
+let currentCollector: ClientToolObservabilityCollector | undefined;
+
+/**
+ * Returns the collector active inside the currently-running client
+ * tool's `execute` function, or `undefined` when no collector is in
+ * scope (e.g. when running outside a client tool, or when the user has
+ * not opted into the `@mastra/client-js/observability` subpath).
+ *
+ * Mirrors the `trace.getActiveSpan()` pattern from `@opentelemetry/api`.
+ *
+ * ```ts
+ * import { getCurrentClientToolObservabilityCollector } from '@mastra/client-js/observability';
+ *
+ * execute: async input => {
+ *   const collector = getCurrentClientToolObservabilityCollector();
+ *   collector?.log('info', 'starting work');
+ *   const result = await collector?.span('http GET /users', () => fetch(...));
+ * }
+ * ```
+ */
+export function getCurrentClientToolObservabilityCollector(): ClientToolObservabilityCollector | undefined {
+  return currentCollector;
+}

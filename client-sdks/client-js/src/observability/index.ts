@@ -29,7 +29,7 @@
  * inside your tool's execute function.
  */
 
-export { createClientToolObservabilityCollector } from './collector';
+export { createClientToolObservabilityCollector, getCurrentClientToolObservabilityCollector } from './collector';
 export type {
   ClientToolObservabilityCollector,
   ClientToolObservabilityCollectorFactory,

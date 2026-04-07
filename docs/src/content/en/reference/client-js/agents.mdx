@@ -315,6 +315,53 @@ response.processDataStream({
 })
 ```
 
+### Tracing client tools
+
+When a client-side tool runs, the server automatically creates a `CLIENT_TOOL_CALL` span as a child of the current `AGENT_RUN` span. The span captures the tool name, input arguments, and a `status='deferred'` marker. This happens for every user with no extra configuration — you'll see the span show up in whatever observability backend `@mastra/observability` is configured to export to.
+
+To capture richer telemetry from inside your client tool's `execute` function (child spans, structured logs), opt into the `@mastra/client-js/observability` subpath and pass the collector factory when constructing the client:
+
+```typescript
+import { MastraClient } from '@mastra/client-js'
+import { createClientToolObservabilityCollector } from '@mastra/client-js/observability'
+
+const client = new MastraClient({
+  baseUrl: 'http://localhost:4111',
+  observability: {
+    collectorFactory: createClientToolObservabilityCollector,
+  },
+})
+```
+
+The collector is per-tool-invocation. Inside your `execute` function, retrieve it via `getCurrentClientToolObservabilityCollector()` (which mirrors the `trace.getActiveSpan()` pattern from `@opentelemetry/api`):
+
+```typescript
+import { createTool } from '@mastra/client-js'
+import { getCurrentClientToolObservabilityCollector } from '@mastra/client-js/observability'
+import { z } from 'zod'
+
+const fetchUserTool = createTool({
+  id: 'fetchUser',
+  description: 'Fetches the current user profile',
+  inputSchema: z.object({ userId: z.string() }),
+  execute: async ({ userId }) => {
+    const collector = getCurrentClientToolObservabilityCollector()
+    collector?.log('info', 'fetching user', { userId })
+    const user = await collector?.span('http GET /users', async () => {
+      const res = await fetch(`/api/users/${userId}`)
+      return res.json()
+    })
+    return user
+  },
+})
+```
+
+When the tool finishes, the SDK serializes everything the collector buffered as OTLP/JSON and ships it back in the next request body. The server's `@mastra/observability` package decodes the payload, validates that the spans actually belong to the trace they claim to (preventing cross-trace injection), and forwards each span/log into the same observability bus that server-side telemetry uses. Your existing exporters pick them up automatically — there's no separate client-side observability backend to configure.
+
+The W3C trace context that the server attached to the original tool-call chunk is the correlation mechanism: the client echoes the same carrier back in the next request body so the server can attach the OTLP children to the deferred `CLIENT_TOOL_CALL` span from the prior turn. The two halves of the round trip end up in the same trace in your backend.
+
+Without the subpath opt-in, you still get the server-side `CLIENT_TOOL_CALL` parent span — the subpath only adds the richer child telemetry from inside your `execute` function.
+
 ## Stored agents
 
 Stored agents are agent configurations stored in a database that can be created, updated, and deleted at runtime. They reference primitives (tools, workflows, other agents, scorers) by key, which are resolved from the Mastra registry when the agent is instantiated. Memory is configured inline as a `SerializedMemoryConfig` object with options such as `lastMessages` and `semanticRecall`.
