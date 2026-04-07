@@ -58,6 +58,32 @@ type ToolCallRespondFn<OUTPUT> = (
   },
 ) => Promise<FullOutput<OUTPUT>>;
 
+/**
+ * W3C carrier shape echoed between server and client for client-tool
+ * tracing. Mirrors `ClientToolObservabilityContext` from
+ * `@mastra/core/observability` but kept inline here so the base SDK
+ * does not import from the opt-in `@mastra/client-js/observability`
+ * subpath.
+ */
+type ClientToolObservabilityCarrier = {
+  traceparent: string;
+  tracestate?: string;
+  baggage?: string;
+};
+
+/**
+ * Minimal collector shape the base SDK expects from a factory. The full
+ * interface lives in `@mastra/client-js/observability`; we duck-type
+ * here so users opting into the subpath can plug it in without the base
+ * SDK depending on it.
+ */
+type CollectorLike = {
+  withContext: <T>(fn: () => Promise<T> | T) => Promise<T>;
+  flush: () => unknown;
+};
+
+type CollectorFactoryLike = (parentContext: ClientToolObservabilityCarrier) => CollectorLike;
+
 async function executeToolCallAndRespond<OUTPUT>({
   response,
   params,
@@ -66,6 +92,7 @@ async function executeToolCallAndRespond<OUTPUT>({
   threadId,
   requestContext,
   respondFn,
+  collectorFactory,
 }: {
   params: StreamParams<OUTPUT>;
   response: Awaited<ReturnType<MastraModelOutput<OUTPUT>['getFullOutput']>>;
@@ -74,11 +101,19 @@ async function executeToolCallAndRespond<OUTPUT>({
   threadId?: string;
   requestContext?: RequestContext<any>;
   respondFn: ToolCallRespondFn<OUTPUT>;
+  collectorFactory?: CollectorFactoryLike;
 }) {
   if (response.finishReason === 'tool-calls') {
     const toolCalls = (
       response as unknown as {
-        toolCalls: { payload: { toolName: string; args: any; toolCallId: string } }[];
+        toolCalls: {
+          payload: {
+            toolName: string;
+            args: any;
+            toolCallId: string;
+            observability?: ClientToolObservabilityCarrier;
+          };
+        }[];
         messages: CoreMessage[];
       }
     ).toolCalls;
@@ -91,18 +126,33 @@ async function executeToolCallAndRespond<OUTPUT>({
       const clientTool = params.clientTools?.[toolCall.payload.toolName] as Tool;
 
       if (clientTool && clientTool.execute) {
-        const result = await clientTool.execute(toolCall?.payload.args, {
-          requestContext: requestContext as RequestContext,
-          tracingContext: { currentSpan: undefined },
-          agent: {
-            agentId,
-            messages: (response as unknown as { messages: CoreMessage[] }).messages,
-            toolCallId: toolCall?.payload.toolCallId,
-            suspend: async () => {},
-            threadId,
-            resourceId,
-          },
-        });
+        // The server attaches a W3C carrier to the tool-call chunk's
+        // `observability` field when client-tool tracing is enabled.
+        // Echo it back in the next request body so the server can do
+        // cross-request trace inheritance, regardless of whether a
+        // collector is configured.
+        const parentContext = toolCall.payload.observability;
+
+        // Lazily construct a collector if a factory is provided AND the
+        // server sent us a carrier. Either condition missing means we
+        // don't collect client-side telemetry.
+        const collector = collectorFactory && parentContext ? collectorFactory(parentContext) : undefined;
+
+        const runExecute = () =>
+          clientTool.execute!(toolCall?.payload.args, {
+            requestContext: requestContext as RequestContext,
+            tracingContext: { currentSpan: undefined },
+            agent: {
+              agentId,
+              messages: (response as unknown as { messages: CoreMessage[] }).messages,
+              toolCallId: toolCall?.payload.toolCallId,
+              suspend: async () => {},
+              threadId,
+              resourceId,
+            },
+          });
+
+        const result = collector ? await collector.withContext(runExecute) : await runExecute();
 
         // Build updated messages from the response, adding the tool result
         // When threadId is present, server has memory - don't re-include original messages to avoid storage duplicates
@@ -133,6 +183,16 @@ async function executeToolCallAndRespond<OUTPUT>({
         };
 
         delete (respondOptions as { messages?: MessageListInput }).messages;
+
+        // Attach observability to the next request body. Even without
+        // a collector, we still echo the parentContext so server-side
+        // cross-request trace inheritance works.
+        if (parentContext) {
+          (respondOptions as { observability?: unknown }).observability = {
+            parentContext,
+            ...(collector ? { payload: collector.flush() } : {}),
+          };
+        }
 
         return respondFn(updatedMessages as MessageListInput, respondOptions);
       }
@@ -557,6 +617,7 @@ export class Agent extends BaseResource {
         threadId,
         requestContext: requestContext as RequestContext<any>,
         respondFn: this.generate.bind(this) as ToolCallRespondFn<OUTPUT>,
+        collectorFactory: this.options.observability?.collectorFactory as CollectorFactoryLike | undefined,
       }) as unknown as Awaited<ReturnType<MastraModelOutput<OUTPUT>['getFullOutput']>>;
     }
 

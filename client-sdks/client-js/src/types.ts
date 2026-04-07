@@ -71,6 +71,34 @@ export interface ClientOptions {
   credentials?: 'omit' | 'same-origin' | 'include';
   /** Custom fetch function to use for HTTP requests. Useful for environments like Tauri that require custom fetch implementations. */
   fetch?: typeof fetch;
+  /**
+   * Client-side observability options.
+   *
+   * Set `collectorFactory` to enable telemetry from inside client-side
+   * tool execute functions. Import the factory from
+   * `@mastra/client-js/observability`:
+   *
+   * ```ts
+   * import { createClientToolObservabilityCollector } from '@mastra/client-js/observability';
+   *
+   * const client = new MastraClient({
+   *   baseUrl,
+   *   observability: { collectorFactory: createClientToolObservabilityCollector },
+   * });
+   * ```
+   *
+   * Without a factory, the SDK still echoes the W3C parent context
+   * back to the server in the next request body so cross-request trace
+   * inheritance works, but no client-side child spans/logs are
+   * collected.
+   *
+   * Typed as `unknown` here so the base SDK does not need to import
+   * from `@mastra/client-js/observability` (which would defeat the
+   * purpose of the opt-in subpath).
+   */
+  observability?: {
+    collectorFactory?: (parentContext: { traceparent: string; tracestate?: string; baggage?: string }) => unknown;
+  };
 }
 
 export type AgentVersionIdentifier = { versionId: string } | { status: 'draft' | 'published' };
