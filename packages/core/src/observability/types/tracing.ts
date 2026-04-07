@@ -52,6 +52,12 @@ export enum SpanType {
   PROCESSOR_RUN = 'processor_run',
   /** Function/tool execution with inputs, outputs, errors */
   TOOL_CALL = 'tool_call',
+  /**
+   * Client-side tool execution. Parent span lives on the server; child
+   * spans/logs flow back from the client SDK as OTLP/JSON via the
+   * ClientToolObservabilityIngest interface in @mastra/observability.
+   */
+  CLIENT_TOOL_CALL = 'client_tool_call',
   /** Workflow run - root span for workflow processes */
   WORKFLOW_RUN = 'workflow_run',
   /** Workflow step execution with step status, data flow */
@@ -262,6 +268,28 @@ export interface ToolCallAttributes extends AIBaseAttributes {
 }
 
 /**
+ * Client Tool Call attributes.
+ *
+ * The CLIENT_TOOL_CALL span is created and ended on the server, but its
+ * execution happens in the client SDK. The span's input/output reflects
+ * what crossed the boundary; richer telemetry from inside the client
+ * tool's execute function (child spans, logs) is forwarded back via the
+ * ClientToolObservabilityIngest interface in @mastra/observability.
+ *
+ * Success/failure is conveyed by `output` vs `errorInfo` on the span,
+ * not as an attribute, matching the convention recommended for new span
+ * types.
+ */
+export interface ClientToolCallAttributes extends AIBaseAttributes {
+  /** Tool category, e.g. 'tool', 'function' */
+  toolType?: string;
+  /** Tool description from createTool */
+  toolDescription?: string;
+  /** Optional environment hint reported by the client (browser, node, deno, etc.) */
+  clientEnvironment?: string;
+}
+
+/**
  * MCP Tool Call attributes
  */
 export interface MCPToolCallAttributes extends AIBaseAttributes {
@@ -437,6 +465,7 @@ export interface SpanTypeMap {
   [SpanType.MODEL_STEP]: ModelStepAttributes;
   [SpanType.MODEL_CHUNK]: ModelChunkAttributes;
   [SpanType.TOOL_CALL]: ToolCallAttributes;
+  [SpanType.CLIENT_TOOL_CALL]: ClientToolCallAttributes;
   [SpanType.MCP_TOOL_CALL]: MCPToolCallAttributes;
   [SpanType.PROCESSOR_RUN]: ProcessorRunAttributes;
   [SpanType.WORKFLOW_STEP]: WorkflowStepAttributes;

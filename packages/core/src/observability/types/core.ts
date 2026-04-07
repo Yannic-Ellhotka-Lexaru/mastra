@@ -9,6 +9,7 @@
 import type { IMastraLogger } from '../../logger';
 import type { Mastra } from '../../mastra';
 import type { RequestContext } from '../../request-context';
+import type { ClientToolObservabilityIngest } from './client-tool';
 import type { FeedbackEvent, FeedbackInput } from './feedback';
 import type { LoggerContext, LogEvent } from './logging';
 import type { MetricsContext, MetricEvent } from './metrics';
@@ -306,6 +307,19 @@ export interface ObservabilityEntrypoint {
     correlationContext?: CorrelationContext;
     feedback: FeedbackInput;
   }): Promise<void>;
+
+  /**
+   * Returns the implementation responsible for client-side tool
+   * observability (W3C trace context propagation + OTLP/JSON ingest of
+   * spans/logs returned from client tools).
+   *
+   * Returns `undefined` when no implementation is registered (e.g.
+   * `NoOpObservability`, or when `@mastra/observability` is not
+   * installed). Callers must treat `undefined` as "no cross-boundary
+   * client tool telemetry" and skip propagation/ingest accordingly. The
+   * server-side `CLIENT_TOOL_CALL` parent span is created either way.
+   */
+  getClientToolObservabilityIngest?(): ClientToolObservabilityIngest | undefined;
 
   // Registry management methods
   registerInstance(name: string, instance: ObservabilityInstance, isDefault?: boolean): void;
