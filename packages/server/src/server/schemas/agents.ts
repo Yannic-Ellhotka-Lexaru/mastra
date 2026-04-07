@@ -262,6 +262,38 @@ export const agentExecutionBodySchema = z
 
     // Observability
     tracingOptions: tracingOptionsSchema.optional(),
+    /**
+     * Cross-request observability for client-side tools.
+     *
+     * Populated by `@mastra/client-js` when re-invoking the agent with
+     * a tool result that came from a client-executed tool.
+     *
+     * - `parentContext` is the W3C carrier the server originally sent
+     *   in the prior turn's tool-call chunk. Echoed back so the new
+     *   `AGENT_RUN` span can inherit the parent trace.
+     * - `payload` is OTLP/JSON spans + logs the client buffered while
+     *   running the tool. Forwarded into the observability bus by
+     *   `ClientToolObservabilityIngest.ingest()` from
+     *   `@mastra/observability`. Validation (traceId match, parent
+     *   resolution, size caps) happens in the ingest implementation.
+     */
+    observability: z
+      .object({
+        parentContext: z
+          .object({
+            traceparent: z.string(),
+            tracestate: z.string().optional(),
+            baggage: z.string().optional(),
+          })
+          .optional(),
+        payload: z
+          .object({
+            spans: z.unknown().optional(),
+            logs: z.unknown().optional(),
+          })
+          .optional(),
+      })
+      .optional(),
 
     // Structured Output
     output: z.any().optional(), // Zod schema, JSON schema, or structured output object

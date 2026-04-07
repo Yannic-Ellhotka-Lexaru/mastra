@@ -166,6 +166,24 @@ export interface ToolCallPayload<TArgs = unknown, TOutput = unknown> {
   providerMetadata?: ProviderMetadata;
   output?: TOutput;
   dynamic?: boolean;
+  /**
+   * Observability carrier for client-side tool execution.
+   *
+   * Populated by the server when emitting a tool call that will be
+   * executed in the client (`providerExecuted: false` and the tool has
+   * no server-side execute function). Holds the W3C trace context for
+   * the deferred CLIENT_TOOL_CALL span so the client SDK can extract
+   * it, parent any child spans/logs it produces underneath, and echo
+   * the carrier back in the next request body for cross-request trace
+   * correlation.
+   *
+   * Typed as `ClientToolObservabilityContext` from
+   * `@mastra/core/observability` but kept as `unknown` here to avoid a
+   * circular import between `stream/types.ts` and the observability
+   * types module — the field is only ever produced and consumed by
+   * code that already imports from `@mastra/core/observability`.
+   */
+  observability?: unknown;
 }
 
 export interface ToolResultPayload<TResult = unknown, TArgs = unknown> {
