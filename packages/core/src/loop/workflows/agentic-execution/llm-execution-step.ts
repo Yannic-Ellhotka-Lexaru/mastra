@@ -12,7 +12,9 @@ import { ModelRouterLanguageModel } from '../../../llm/model/router';
 import type { MastraLanguageModel, SharedProviderOptions } from '../../../llm/model/shared.types';
 import type { IMastraLogger } from '../../../logger';
 import { ConsoleLogger } from '../../../logger';
-import { createObservabilityContext, SpanType } from '../../../observability';
+import type { Mastra } from '../../../mastra';
+import { createObservabilityContext, EntityType, SpanType } from '../../../observability';
+import type { TracingContext } from '../../../observability';
 import { executeWithContextSync } from '../../../observability/utils';
 import type { ProcessorStreamWriter } from '../../../processors/index';
 import { PrepareStepProcessor } from '../../../processors/processors/prepare-step';
@@ -58,6 +60,15 @@ type ProcessOutputStreamOptions<OUTPUT = undefined> = {
   logger?: IMastraLogger;
   transportRef?: StreamTransportRef;
   transportResolver?: () => StreamTransport | undefined;
+  /**
+   * Mastra instance reference. Used to look up the client tool
+   * observability ingest implementation when emitting tool-call chunks
+   * for client-side tools, so we can attach a W3C trace context carrier
+   * the client SDK can extract.
+   */
+  mastra?: Mastra;
+  /** Active tracing context. Parent of any CLIENT_TOOL_CALL spans we create. */
+  tracingContext?: TracingContext;
 };
 
 function buildResponseModelMetadata(runState: AgenticRunState): { metadata: Record<string, unknown> } | undefined {
@@ -78,6 +89,8 @@ async function processOutputStream<OUTPUT = undefined>({
   logger,
   transportRef,
   transportResolver,
+  mastra,
+  tracingContext,
 }: ProcessOutputStreamOptions<OUTPUT>) {
   let transportSet = false;
 
@@ -530,6 +543,51 @@ async function processOutputStream<OUTPUT = undefined>({
         };
         messageList.add(message, 'response');
 
+        // Client-tool tracing: when the model emits a tool call that
+        // will be deferred to the client (no provider execution AND no
+        // server-side execute function), create a CLIENT_TOOL_CALL
+        // span as a marker, attach a W3C carrier to the chunk so the
+        // client SDK can extract trace context, and end the span
+        // immediately. The actual execution and child telemetry happen
+        // in the client SDK and arrive back via OTLP/JSON ingest in
+        // the next request.
+        const isClientTool = !inferredProviderExecuted && !(toolDef as { execute?: unknown } | undefined)?.execute;
+        if (isClientTool && mastra && tracingContext?.currentSpan) {
+          const ingest = mastra.observability?.getClientToolObservabilityIngest?.();
+          if (ingest) {
+            try {
+              const clientToolSpan = tracingContext.currentSpan.createChildSpan({
+                type: SpanType.CLIENT_TOOL_CALL,
+                name: `client_tool: '${chunk.payload.toolName}'`,
+                input: chunk.payload.args,
+                entityType: EntityType.TOOL,
+                entityId: chunk.payload.toolName,
+                entityName: chunk.payload.toolName,
+                attributes: {
+                  toolDescription: (toolDef as { description?: string } | undefined)?.description,
+                  toolType: 'client-tool',
+                },
+              });
+              if (clientToolSpan) {
+                const carrier = ingest.inject(clientToolSpan);
+                // Mutate the chunk's payload before enqueueing so the
+                // carrier reaches the client SDK as part of the
+                // tool-call event.
+                (chunk.payload as { observability?: unknown }).observability = carrier;
+                clientToolSpan.end({
+                  metadata: { status: 'deferred' },
+                });
+              }
+            } catch (err) {
+              // Tracing must never break the agent run.
+              logger?.warn?.('[ClientToolObservability] failed to create deferred CLIENT_TOOL_CALL span', {
+                error: err instanceof Error ? err.message : String(err),
+                toolName: chunk.payload.toolName,
+              });
+            }
+          }
+        }
+
         safeEnqueue(controller, chunk);
         break;
       }
@@ -636,6 +694,7 @@ export function createLLMExecutionStep<TOOLS extends ToolSet = ToolSet, OUTPUT =
   maxProcessorRetries,
   workspace,
   outputWriter,
+  mastra,
 }: OuterLLMRun<TOOLS, OUTPUT>) {
   const initialSystemMessages = messageList.getAllSystemMessages();
 
@@ -1082,6 +1141,8 @@ export function createLLMExecutionStep<TOOLS extends ToolSet = ToolSet, OUTPUT =
             logger,
             transportRef: _internal?.transportRef,
             transportResolver,
+            mastra,
+            tracingContext,
           });
         } catch (error) {
           const provider = model?.provider;
