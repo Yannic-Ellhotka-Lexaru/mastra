@@ -26,30 +26,94 @@ it) so they land in whatever exporters the user already has configured.
 
 ## Architecture
 
+> **Important architectural note (discovered during implementation):**
+> Client-side tool execution spans **two separate HTTP requests** to the
+> server, not one. The first request emits the tool call and ends. The
+> client SDK runs the tool and re-invokes `agent.stream()` with the
+> result appended as a tool-role message — that re-invocation is a
+> separate agent run.
+>
+> Detection of "this is a client tool" happens implicitly via
+> `providerExecuted: false`
+> (`packages/core/src/loop/workflows/agentic-execution/llm-mapping-step.ts:127-170`)
+> and via the absence of an execute function
+> (`packages/core/src/loop/workflows/agentic-execution/tool-call-step.ts:258-260`).
+> There is no built-in cross-request trace correlation today, **so this
+> PR adds one**: the W3C trace context carrier the server sends to the
+> client in request 1 is echoed back by the client in request 2's body,
+> giving the second `AGENT_RUN` span a parent it can inherit from.
+>
+> **The W3C carrier is the correlationId.** No new identifier is
+> introduced — we reuse `traceparent` / `tracestate` / `baggage`, which
+> already uniquely identify a span and carry sampling decisions. The
+> client SDK echoes back what it received and the server treats it as
+> the authoritative parent context for the subsequent run.
+>
+> Concretely:
+>
+> 1. Request 1: server emits a tool call with `providerExecuted: false`,
+>    creates a `CLIENT_TOOL_CALL` child span of the current `AGENT_RUN`,
+>    injects W3C carrier (traceparent points at this span), attaches the
+>    carrier to the tool-call chunk's `observability` field, and ends
+>    the span immediately with `attributes: { status: 'deferred' }`.
+>    The span captures inputs and the carrier that was sent out; the
+>    deferred status signals "this isn't done, look for child spans
+>    arriving later in this trace".
+> 2. Client SDK extracts the W3C carrier, runs the user's execute
+>    function inside the extracted OTEL context with a buffering
+>    provider, flushes child spans/logs as OTLP/JSON, and includes BOTH
+>    the original carrier AND the OTLP payload in the next
+>    `agent.stream()` request body under a top-level `observability`
+>    field.
+> 3. Request 2: server reads `observability.parentContext` from the body
+>    and uses it as the parent for the new `AGENT_RUN` span, so request
+>    2's trace inherits request 1's traceId. Reads `observability.payload`
+>    and feeds it through `ClientToolObservabilityIngest.ingest()` which
+>    decodes the OTLP, validates that all spans have the expected traceId
+>    and that parents resolve, and forwards each span/log into the
+>    observability bus. The client's spans land under the prior deferred
+>    `CLIENT_TOOL_CALL` span (because their `parentSpanId` points at it),
+>    so trace backends visualize the whole thing as one coherent trace.
+>
+> The deferred span ends "early" (at request-1 time) but its children
+> arrive "late" (at request-2 time). OTLP traces explicitly allow
+> out-of-order span arrival within a trace, so this is well-defined.
+
 ```
-[server agent run]
-  └─ tool builder sees a 'client-tool' typed call
-  └─ creates CLIENT_TOOL_CALL span (parent = current model/agent span)
-  └─ if client-tool tracing ingest is registered:
-       - inject(span) → { traceparent, tracestate?, baggage? }
-       - attach to outgoing tool-call chunk
+[server, request 1]
+  └─ AGENT_RUN span (traceId = T1)
+      └─ model emits tool call with providerExecuted=false
+      └─ if observability ingest registered:
+          - create CLIENT_TOOL_CALL "deferred" child span (spanId = S1)
+          - inject(span) -> W3C carrier { traceparent: 00-T1-S1-01 }
+          - attach to tool-call chunk's `observability` field
+          - span.end({ attributes: { status: 'deferred' } })
+      └─ AGENT_RUN span ends; HTTP response closes
        │
        ▼
   [@mastra/client-js] (with @mastra/client-js/observability opted in)
     └─ extract W3C context from chunk
     └─ run clientTool.execute() inside that context
-    └─ buffer child spans/logs/metrics via in-memory OTEL providers
-    └─ flush as OTLP/JSON, attach to outgoing tool-result payload
+    └─ buffer child spans/logs via in-memory OTEL providers
+       (children have traceId=T1, parentSpanId=S1)
+    └─ flush as OTLP/JSON
+    └─ next request body:
+         { messages: [..., toolResult],
+           observability: { parentContext: <original carrier>,
+                            payload: { spans, logs } } }
        │
        ▼
-[server tool-result handler]
-  └─ if observability.otlp present + ingest registered:
-       - ingestOtlp(payload, clientToolSpan)
-         · validate every span's traceId == parent traceId
-         · validate parents resolve to clientToolSpan or another span in payload
+[server, request 2]
+  └─ extract observability.parentContext -> traceId=T1, parentSpanId=S1
+  └─ AGENT_RUN span inherits trace: traceId = T1, parent = S1
+  └─ if observability.payload present + ingest registered:
+       - ingest(payload, parentContext)
+         · validate every span's traceId == T1
+         · validate parents resolve to S1 or another span in payload
          · enforce size/count caps
-         · forward each span/log/metric to existing observability bus
-  └─ clientToolSpan.end({ output }) or .error({ error })
+         · forward each span/log into the observability bus
+       (children land under S1 because their parentSpanId points at it)
+  └─ agent run continues with the tool result
 ```
 
 The wire format is OTLP/JSON because it is a stable, public spec that does
@@ -104,15 +168,19 @@ export interface ClientToolObservabilityPayload {
 }
 
 export interface ClientToolObservabilityIngest {
-  /** Inject current span context into the chunk going to the client. */
+  /**
+   * Called from request 1 when the agent emits a client-side tool
+   * call. Returns a W3C carrier for the parent span.
+   */
   inject(parentSpan: AnySpan): ClientToolObservabilityContext;
 
   /**
-   * Ingest OTLP/JSON spans + logs returned by the client, parented under
-   * the given span. Implementations must validate that traceIds match and
-   * parent links resolve before forwarding to the observability bus.
+   * Called from request 2 when the agent receives the tool result.
+   * Note that the parent span has already ended in a previous run, so
+   * we pass the carrier (which the client echoed back) rather than a
+   * live span.
    */
-  ingest(payload: ClientToolObservabilityPayload, parentSpan: AnySpan): void;
+  ingest(payload: ClientToolObservabilityPayload, parentContext: ClientToolObservabilityContext): void;
 }
 ```
 
@@ -121,34 +189,75 @@ Re-exported from `packages/core/src/observability/index.ts`.
 **`packages/core/src/stream/types.ts`**
 
 - Add optional `observability?: ClientToolObservabilityContext` to the
-  tool-call chunk payload. (Named `observability`, not `tracing`, so it
-  can carry log/metric context too without future renames — matches the
-  user's preference for observability-shaped context objects over
-  tracing-only ones.)
+  tool-call chunk payload (`ToolCallPayload` at
+  `packages/core/src/stream/types.ts:159-169`).
 - Add optional `observability?: ClientToolObservabilityPayload` to the
   tool-result payload.
 
-**`packages/core/src/tools/tool-builder/builder.ts`**
+**`packages/core/src/loop/workflows/agentic-execution/`** (suspension
+detection lives here, NOT in the tool builder)
 
-When a tool is detected as `'client-tool'` typed (existing path that today
-defers execution to the client):
+When the loop detects a tool call with `providerExecuted: false` (the
+implicit "this is a client tool" signal in
+`llm-mapping-step.ts:127-170`), and after `tool-call-step.ts:258`
+returns with no result because the client tool has no `execute`
+function:
 
-1. **Always** create the `CLIENT_TOOL_CALL` span as a child of the
-   current span. Input = the tool args. Attributes = `toolDescription`,
-   `toolType`. This happens regardless of whether the client opts into
-   the observability subpath — every user gets at least the server-side
-   span showing that a client tool ran and how long it took.
+1. **Always** create a `CLIENT_TOOL_CALL` child span of the current
+   `AGENT_RUN`. Input = the tool args. Attributes = `toolDescription`,
+   `toolType`. Created regardless of whether client-side observability
+   is enabled — every user gets the server-side marker showing that a
+   client tool was invoked.
 2. If `mastra.observability.getClientToolObservabilityIngest()` returns
    an implementation, call `inject(span)` and attach the result to the
-   outgoing tool-call chunk's `observability` field.
-3. When the matching tool result returns:
-   - If it carries `observability` payload and an ingest is registered,
-     call `ingest(payload, span)`.
-   - `span.end({ output: result })` on success, `span.error({ error })`
-     on failure.
-4. If no ingest is registered, skip steps 2 and 3. The span is still
-   created and ended; only the cross-boundary child span/log flow is
-   skipped.
+   tool-call chunk's `observability` field.
+3. End the span immediately with
+   `attributes: { status: 'deferred' }` (and no output) — the actual
+   execution result and child telemetry will arrive in the next agent
+   run via the OTLP ingest path.
+
+**Server entry point** (`packages/server/src/server/handlers/agents.ts`
+stream/generate handlers, before the agent run starts):
+
+When a request body carries an `observability` field:
+
+1. If `observability.parentContext` is present, use it as the parent
+   trace context for the new `AGENT_RUN` span so request 2's trace
+   inherits request 1's traceId/spanId. This is the cross-request trace
+   correlation mechanism — the client echoes back the same W3C carrier
+   it received, and the server treats it as authoritative.
+2. If `observability.payload` is present and
+   `getClientToolObservabilityIngest()` returns an implementation, call
+   `ingest(payload, parentContext)`. The ingest validates traceIds,
+   resolves parent links, and forwards each span/log into the
+   observability bus where existing exporters pick them up.
+3. If no ingest is registered but the payload is present, drop it
+   silently (with a debug log). Should never normally happen because
+   the client only sends the payload when the server sent a carrier in
+   the prior turn, and that only happens when an ingest exists.
+
+**`packages/server/src/server/schemas/agents.ts`**
+
+Extend `agentExecutionBodySchema` (lines 205-279) with an optional
+top-level `observability` field:
+
+```ts
+observability: z.object({
+  parentContext: z
+    .object({
+      traceparent: z.string(),
+      tracestate: z.string().optional(),
+      baggage: z.string().optional(),
+    })
+    .optional(),
+  payload: z
+    .object({
+      spans: z.unknown().optional(),
+      logs: z.unknown().optional(),
+    })
+    .optional(),
+}).optional();
+```
 
 **`packages/core/src/mastra/index.ts`**
 
@@ -272,7 +381,7 @@ try {
           context: args,
           runtimeContext,
           tracingContext: { currentSpan: collector.rootSpan },
-        })
+        }),
       )
     : await clientTool.execute({ context: args, runtimeContext });
 } catch (e) {
@@ -399,4 +508,3 @@ server-side `CLIENT_TOOL_CALL` parent span in their existing exporters.
    tools.** Users who want it can register their own OTEL
    instrumentation; it will parent correctly under `CLIENT_TOOL_CALL`
    because the collector `withContext`s the execution.
-

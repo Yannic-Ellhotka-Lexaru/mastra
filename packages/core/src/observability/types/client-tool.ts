@@ -50,33 +50,46 @@ export interface ClientToolObservabilityPayload {
 /**
  * Server-side ingest interface for client tool observability data.
  *
- * Provided by `@mastra/observability`. The tool builder/agent calls
- * `inject` when emitting a client tool invocation to populate the chunk
- * with W3C trace context, and calls `ingest` when the matching tool
- * result returns to feed any attached spans/logs back into the
- * observability bus.
+ * Provided by `@mastra/observability`. The agent calls `inject` when
+ * emitting a client tool invocation (request 1) to populate the chunk
+ * with a W3C trace context carrier, and calls `ingest` on the next
+ * request (request 2, the one that brings back the tool result) to
+ * feed the client's buffered spans/logs into the observability bus.
+ *
+ * Note that `ingest` is called from a **different agent run** than
+ * `inject` was: client-side tool execution spans two HTTP requests, so
+ * by the time the OTLP payload arrives, the original `CLIENT_TOOL_CALL`
+ * span has already ended. That is why `ingest` takes a
+ * `ClientToolObservabilityContext` (the carrier the client echoed back)
+ * rather than a live `AnySpan` — the carrier is the only thing that
+ * survives across the two requests.
  *
  * Implementations must validate that:
- *  - every span/log `traceId` matches `parentSpan.traceId`
- *  - every span's `parentSpanId` resolves to `parentSpan.spanId` or to
- *    another span present in the same payload (no orphans, no
- *    cross-trace injection)
+ *  - every span/log `traceId` matches the traceparent in
+ *    `parentContext`
+ *  - every span's `parentSpanId` resolves to the span identified by
+ *    `parentContext` or to another span present in the same payload
+ *    (no orphans, no cross-trace injection)
  *  - every log record's `spanId` resolves to a span in the payload or
- *    to `parentSpan.spanId`
+ *    to the span identified by `parentContext`
  *  - hard caps on span/log counts and total payload size are enforced
  */
 export interface ClientToolObservabilityIngest {
   /**
-   * Inject the parent span's W3C context (and any other observability
-   * hints) into a carrier for transport to the client.
+   * Inject the parent span's W3C context into a carrier for transport
+   * to the client. Called from request 1 when the agent emits a
+   * client-side tool call.
    */
   inject(parentSpan: AnySpan): ClientToolObservabilityContext;
 
   /**
    * Validate and ingest an OTLP/JSON payload returned by the client,
-   * parented under `parentSpan`. Implementations should silently drop
-   * invalid payloads (logging a warning) rather than throwing, so a
-   * misbehaving client tool cannot break the agent run.
+   * parented under the span identified by `parentContext`. Called from
+   * request 2 when the agent receives the tool result from the client.
+   *
+   * Implementations should silently drop invalid payloads (logging a
+   * warning) rather than throwing, so a misbehaving client tool cannot
+   * break the agent run.
    */
-  ingest(payload: ClientToolObservabilityPayload, parentSpan: AnySpan): void;
+  ingest(payload: ClientToolObservabilityPayload, parentContext: ClientToolObservabilityContext): void;
 }
