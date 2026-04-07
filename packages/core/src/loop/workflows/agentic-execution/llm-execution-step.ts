@@ -545,21 +545,24 @@ async function processOutputStream<OUTPUT = undefined>({
 
         // Client-tool tracing: when the model emits a tool call that
         // will be deferred to the client (no provider execution AND no
-        // server-side execute function), create a CLIENT_TOOL_CALL
-        // span as a marker, attach a W3C carrier to the chunk so the
-        // client SDK can extract trace context, and end the span
-        // immediately. The actual execution and child telemetry happen
-        // in the client SDK and arrive back via OTLP/JSON ingest in
-        // the next request.
+        // server-side execute function), record a CLIENT_TOOL_CALL
+        // event span as a marker on the trace and attach a W3C carrier
+        // to the chunk so the client SDK can extract trace context.
+        //
+        // We use an event span (occurs at startTime, no endTime)
+        // because the actual execution happens on the client and the
+        // server has no meaningful duration to record. The client's
+        // child spans arrive in the next agent run via OTLP/JSON
+        // ingest and parent themselves under this event span via
+        // parentSpanId reference.
         const isClientTool = !inferredProviderExecuted && !(toolDef as { execute?: unknown } | undefined)?.execute;
         if (isClientTool && mastra && tracingContext?.currentSpan) {
           const ingest = mastra.observability?.getClientToolObservabilityIngest?.();
           if (ingest) {
             try {
-              const clientToolSpan = tracingContext.currentSpan.createChildSpan({
+              const clientToolSpan = tracingContext.currentSpan.createEventSpan({
                 type: SpanType.CLIENT_TOOL_CALL,
                 name: `client_tool: '${chunk.payload.toolName}'`,
-                input: chunk.payload.args,
                 entityType: EntityType.TOOL,
                 entityId: chunk.payload.toolName,
                 entityName: chunk.payload.toolName,
@@ -567,6 +570,12 @@ async function processOutputStream<OUTPUT = undefined>({
                   toolDescription: (toolDef as { description?: string } | undefined)?.description,
                   toolType: 'client-tool',
                 },
+                // Event spans don't have an `input` slot (they record
+                // a point-in-time occurrence, not a start). The args
+                // are already captured in the agent's message history;
+                // we also stash them in metadata so trace viewers can
+                // surface them on the span itself.
+                metadata: { args: chunk.payload.args },
               });
               if (clientToolSpan) {
                 const carrier = ingest.inject(clientToolSpan);
@@ -574,13 +583,10 @@ async function processOutputStream<OUTPUT = undefined>({
                 // carrier reaches the client SDK as part of the
                 // tool-call event.
                 (chunk.payload as { observability?: unknown }).observability = carrier;
-                clientToolSpan.end({
-                  metadata: { status: 'deferred' },
-                });
               }
             } catch (err) {
               // Tracing must never break the agent run.
-              logger?.warn?.('[ClientToolObservability] failed to create deferred CLIENT_TOOL_CALL span', {
+              logger?.warn?.('[ClientToolObservability] failed to create CLIENT_TOOL_CALL event span', {
                 error: err instanceof Error ? err.message : String(err),
                 toolName: chunk.payload.toolName,
               });

@@ -53,9 +53,13 @@ export enum SpanType {
   /** Function/tool execution with inputs, outputs, errors */
   TOOL_CALL = 'tool_call',
   /**
-   * Client-side tool execution. Parent span lives on the server; child
-   * spans/logs flow back from the client SDK as OTLP/JSON via the
-   * ClientToolObservabilityIngest interface in @mastra/observability.
+   * Client-side tool execution. Recorded as an event span on the
+   * server (occurs at a point in time, no endTime) since the actual
+   * execution happens in the client SDK. Child spans/logs from inside
+   * the client tool's execute function flow back as OTLP/JSON via the
+   * ClientToolObservabilityIngest interface in @mastra/observability
+   * and parent themselves under this event span via parentSpanId
+   * reference.
    */
   CLIENT_TOOL_CALL = 'client_tool_call',
   /** Workflow run - root span for workflow processes */
@@ -270,15 +274,13 @@ export interface ToolCallAttributes extends AIBaseAttributes {
 /**
  * Client Tool Call attributes.
  *
- * The CLIENT_TOOL_CALL span is created and ended on the server, but its
- * execution happens in the client SDK. The span's input/output reflects
- * what crossed the boundary; richer telemetry from inside the client
- * tool's execute function (child spans, logs) is forwarded back via the
- * ClientToolObservabilityIngest interface in @mastra/observability.
- *
- * Success/failure is conveyed by `output` vs `errorInfo` on the span,
- * not as an attribute, matching the convention recommended for new span
- * types.
+ * CLIENT_TOOL_CALL is an event span: it occurs at a point in time
+ * (when the agent emits a tool call that will be executed in the
+ * client SDK) and has no endTime. The actual execution happens on the
+ * client; richer telemetry from inside the client tool's execute
+ * function (child spans, logs) is forwarded back via the
+ * ClientToolObservabilityIngest interface in @mastra/observability and
+ * parented under this event span via parentSpanId reference.
  */
 export interface ClientToolCallAttributes extends AIBaseAttributes {
   /** Tool category, e.g. 'tool', 'function' */

@@ -317,7 +317,7 @@ response.processDataStream({
 
 ### Tracing client tools
 
-When a client-side tool runs, the server automatically creates a `CLIENT_TOOL_CALL` span as a child of the current `AGENT_RUN` span. The span captures the tool name, input arguments, and a `status='deferred'` marker. This happens for every user with no extra configuration — you'll see the span show up in whatever observability backend `@mastra/observability` is configured to export to.
+When a client-side tool runs, the server automatically records a `CLIENT_TOOL_CALL` event span as a child of the current `AGENT_RUN` span. Event spans occur at a point in time (no end time) and mark "this client tool was deferred to the client at this moment in the trace" — the actual execution happens on the client and any child spans/logs from inside it parent themselves under this event span via OTLP/JSON ingest in the next agent run. This happens for every user with no extra configuration.
 
 To capture richer telemetry from inside your client tool's `execute` function (child spans, structured logs), opt into the `@mastra/client-js/observability` subpath and pass the collector factory when constructing the client:
 
