@@ -1,5 +1,13 @@
 # @mastra/core
 
+## 1.24.2-alpha.1
+
+### Patch Changes
+
+- Fixed symlinked skill paths so workspace skills resolve consistently and allowed path checks work through both symlink and real paths. ([#15228](https://github.com/mastra-ai/mastra/pull/15228))
+
+- Improved `structuredOutput.model` error messages to surface upstream structuring failures, including plain-object errors, instead of a generic internal agent error. ([#15226](https://github.com/mastra-ai/mastra/pull/15226))
+
 ## 1.24.2-alpha.0
 
 ### Patch Changes

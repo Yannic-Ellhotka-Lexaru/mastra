@@ -128,6 +128,8 @@
   "changesets": [
     "@mastra_core-15214-dependencies",
     "@mastra_playground-ui-15085-dependencies",
+    "fine-tables-roll",
+    "four-yaks-invite",
     "green-birds-knock",
     "lovely-moles-camp",
     "stale-worlds-happen",
