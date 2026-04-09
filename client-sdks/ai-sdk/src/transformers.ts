@@ -392,7 +392,15 @@ export function createAgentStreamToAISDKTransformer<OUTPUT>(
             undefined,
             convertMastraChunkToAISDK,
           );
-          if (workflowChunk) controller.enqueue(workflowChunk);
+          if (workflowChunk) {
+            if (Array.isArray(workflowChunk)) {
+              for (const item of workflowChunk) {
+                controller.enqueue(item);
+              }
+            } else {
+              controller.enqueue(workflowChunk);
+            }
+          }
         } else if (transformedChunk.type === 'tool-network') {
           const payload = transformedChunk.payload;
           const networkChunk = transformNetwork(payload, bufferedSteps, true);
